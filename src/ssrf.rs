@@ -83,8 +83,7 @@ pub fn validate_endpoint(endpoint: &str) -> Result<String, String> {
 
     let url = url_parse(endpoint)?;
 
-    let is_localhost =
-        url.host == "localhost" || url.host == "127.0.0.1" || url.host == "::1";
+    let is_localhost = url.host == "localhost" || url.host == "127.0.0.1" || url.host == "::1";
 
     if url.scheme != "https" && !is_localhost {
         return Err(format!(

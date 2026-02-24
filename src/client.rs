@@ -1,5 +1,5 @@
 use crate::ssrf::validate_endpoint;
-use crate::types::{Options, RequestEvent};
+use crate::types::{ErrorCallback, Options, RequestEvent};
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -20,6 +20,7 @@ struct Inner {
     consecutive_failures: u32,
     backoff_until: Instant,
     flush_in_flight: bool,
+    wake: bool, // condvar predicate — set when flush or shutdown is requested
 }
 
 /// Buffered analytics client.
@@ -47,7 +48,7 @@ struct ClientOpts {
     max_event_bytes: usize,
     debug: bool,
     storage_path: String,
-    on_error: Option<Box<dyn Fn(&dyn std::error::Error) + Send + Sync>>,
+    on_error: Option<ErrorCallback>,
 }
 
 impl ApiDashClient {
@@ -59,9 +60,7 @@ impl ApiDashClient {
         if opts.api_key.is_empty() {
             return Err("[apidash] 'api_key' is required".to_string());
         }
-        if opts.api_key.contains('\0')
-            || opts.api_key.contains('\r')
-            || opts.api_key.contains('\n')
+        if opts.api_key.contains('\0') || opts.api_key.contains('\r') || opts.api_key.contains('\n')
         {
             return Err("[apidash] 'api_key' contains invalid characters".to_string());
         }
@@ -78,20 +77,32 @@ impl ApiDashClient {
                 .to_string()
         });
 
-        let batch_size = if opts.batch_size == 0 { 100 } else { opts.batch_size };
+        let batch_size = if opts.batch_size == 0 {
+            100
+        } else {
+            opts.batch_size
+        };
 
         let client_opts = ClientOpts {
             api_key: opts.api_key,
             endpoint,
             flush_interval: opts.flush_interval,
             batch_size,
-            max_buffer_size: if opts.max_buffer_size == 0 { 10_000 } else { opts.max_buffer_size },
+            max_buffer_size: if opts.max_buffer_size == 0 {
+                10_000
+            } else {
+                opts.max_buffer_size
+            },
             max_storage_bytes: if opts.max_storage_bytes == 0 {
                 5_242_880
             } else {
                 opts.max_storage_bytes
             },
-            max_event_bytes: if opts.max_event_bytes == 0 { 65_536 } else { opts.max_event_bytes },
+            max_event_bytes: if opts.max_event_bytes == 0 {
+                65_536
+            } else {
+                opts.max_event_bytes
+            },
             debug: opts.debug,
             storage_path,
             on_error: opts.on_error,
@@ -103,6 +114,7 @@ impl ApiDashClient {
             consecutive_failures: 0,
             backoff_until: Instant::now(),
             flush_in_flight: false,
+            wake: false,
         };
 
         let client = Arc::new(Self {
@@ -173,11 +185,15 @@ impl ApiDashClient {
         let mut guard = self.inner.lock().unwrap();
         if guard.buffer.len() >= self.opts.max_buffer_size {
             // Buffer full — signal flush
+            guard.wake = true;
             self.cond.notify_one();
             return;
         }
         guard.buffer.push(event);
         let should_flush = guard.buffer.len() >= self.opts.batch_size;
+        if should_flush {
+            guard.wake = true;
+        }
         drop(guard);
 
         if should_flush {
@@ -200,10 +216,10 @@ impl ApiDashClient {
             }
             guard.flush_in_flight = true;
 
-            // Double-buffer swap
-            let events = std::mem::replace(&mut guard.buffer, std::mem::take(&mut guard.spare));
-            guard.spare = Vec::new();
-            events
+            // Double-buffer swap: take spare first to avoid double borrow
+            let spare = std::mem::take(&mut guard.spare);
+
+            std::mem::replace(&mut guard.buffer, spare)
         };
 
         let result = self.send(&events);
@@ -246,8 +262,7 @@ impl ApiDashClient {
                     let space = self.opts.max_buffer_size.saturating_sub(guard.buffer.len());
                     let reinsert_count = events.len().min(space);
                     if reinsert_count > 0 {
-                        let mut merged =
-                            Vec::with_capacity(reinsert_count + guard.buffer.len());
+                        let mut merged = Vec::with_capacity(reinsert_count + guard.buffer.len());
                         merged.extend_from_slice(&events[..reinsert_count]);
                         merged.append(&mut guard.buffer);
                         guard.buffer = merged;
@@ -276,6 +291,10 @@ impl ApiDashClient {
         }
 
         // Wake the background thread so it exits
+        {
+            let mut guard = self.inner.lock().unwrap();
+            guard.wake = true;
+        }
         self.cond.notify_one();
 
         // Join background thread
@@ -313,17 +332,19 @@ impl ApiDashClient {
 
     fn background_loop(&self) {
         loop {
-            let _guard = self.inner.lock().unwrap();
-            let (guard, timeout) =
-                self.cond.wait_timeout(_guard, self.opts.flush_interval).unwrap();
+            // Wait until woken or flush interval elapses
+            let guard = self.inner.lock().unwrap();
+            let (mut guard, _) = self
+                .cond
+                .wait_timeout_while(guard, self.opts.flush_interval, |inner| !inner.wake)
+                .unwrap();
+            guard.wake = false;
             drop(guard);
 
             if self.closed.load(Ordering::Relaxed) {
                 break;
             }
 
-            // Flush regardless of whether we were woken or timed out
-            let _ = timeout; // suppress unused warning
             self.flush();
         }
     }

@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// Error callback type for background flush errors.
+pub type ErrorCallback = Box<dyn Fn(&dyn std::error::Error) + Send + Sync>;
+
 /// A single captured API request event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RequestEvent {
     pub method: String,
     pub path: String,
@@ -42,7 +45,7 @@ pub struct Options {
     /// Default: `<temp_dir>/apidash-events-<hash>.jsonl`
     pub storage_path: Option<String>,
     /// Optional error callback invoked from the background thread.
-    pub on_error: Option<Box<dyn Fn(&dyn std::error::Error) + Send + Sync>>,
+    pub on_error: Option<ErrorCallback>,
 }
 
 impl Options {

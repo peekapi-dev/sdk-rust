@@ -40,11 +40,11 @@ impl Fairing for ApiDashFairing {
 
     async fn on_request(&self, req: &mut Request<'_>, _data: &mut Data<'_>) {
         // Store the start time in local cache
-        req.local_cache(|| Instant::now());
+        req.local_cache(Instant::now);
     }
 
     async fn on_response<'r>(&self, req: &'r Request<'_>, resp: &mut Response<'r>) {
-        let start = *req.local_cache(|| Instant::now());
+        let start = *req.local_cache(Instant::now);
         let elapsed = start.elapsed();
 
         let method = req.method().as_str().to_string();
@@ -59,9 +59,8 @@ impl Fairing for ApiDashFairing {
 
         let response_size = resp.body().preset_size().unwrap_or(0);
 
-        let consumer_id = default_identify_consumer(|name| {
-            req.headers().get_one(name).map(|v| v.to_string())
-        });
+        let consumer_id =
+            default_identify_consumer(|name| req.headers().get_one(name).map(|v| v.to_string()));
 
         self.client.track(RequestEvent {
             method,
