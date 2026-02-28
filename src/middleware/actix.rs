@@ -3,15 +3,15 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use apidash::{ApiDashClient, Options};
-//! use apidash::middleware::actix::ApiDash;
+//! use peekapi::{PeekApiClient, Options};
+//! use peekapi::middleware::actix::PeekApi;
 //!
-//! let client = ApiDashClient::new(Options::new("key", "https://example.com/ingest")).unwrap();
-//! let app = actix_web::App::new().wrap(ApiDash::new(client));
+//! let client = PeekApiClient::new(Options::new("key", "https://example.com/ingest")).unwrap();
+//! let app = actix_web::App::new().wrap(PeekApi::new(client));
 //! ```
 
 use crate::consumer::default_identify_consumer;
-use crate::{ApiDashClient, RequestEvent};
+use crate::{PeekApiClient, RequestEvent};
 
 use actix_service::{Service, Transform};
 use actix_web::body::MessageBody;
@@ -23,41 +23,41 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// Actix Web middleware that captures request analytics.
-pub struct ApiDash {
-    client: Arc<ApiDashClient>,
+pub struct PeekApi {
+    client: Arc<PeekApiClient>,
 }
 
-impl ApiDash {
-    pub fn new(client: Arc<ApiDashClient>) -> Self {
+impl PeekApi {
+    pub fn new(client: Arc<PeekApiClient>) -> Self {
         Self { client }
     }
 }
 
-impl<S, B> Transform<S, ServiceRequest> for ApiDash
+impl<S, B> Transform<S, ServiceRequest> for PeekApi
 where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
     B: MessageBody + 'static,
 {
     type Response = ServiceResponse<B>;
     type Error = Error;
-    type Transform = ApiDashService<S>;
+    type Transform = PeekApiMiddleware<S>;
     type InitError = ();
     type Future = Ready<Result<Self::Transform, Self::InitError>>;
 
     fn new_transform(&self, service: S) -> Self::Future {
-        ready(Ok(ApiDashService {
+        ready(Ok(PeekApiMiddleware {
             service,
             client: Arc::clone(&self.client),
         }))
     }
 }
 
-pub struct ApiDashService<S> {
+pub struct PeekApiMiddleware<S> {
     service: S,
-    client: Arc<ApiDashClient>,
+    client: Arc<PeekApiClient>,
 }
 
-impl<S, B> Service<ServiceRequest> for ApiDashService<S>
+impl<S, B> Service<ServiceRequest> for PeekApiMiddleware<S>
 where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
     B: MessageBody + 'static,
@@ -76,7 +76,16 @@ where
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let start = Instant::now();
         let method = req.method().to_string();
-        let path = req.path().to_string();
+        let mut path = req.path().to_string();
+        if self.client.collect_query_string() {
+            let qs = req.query_string();
+            if !qs.is_empty() {
+                let mut params: Vec<&str> = qs.split('&').collect();
+                params.sort();
+                path.push('?');
+                path.push_str(&params.join("&"));
+            }
+        }
         let request_size = req
             .headers()
             .get("content-length")
@@ -84,12 +93,17 @@ where
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(0);
 
-        let consumer_id = default_identify_consumer(|name| {
+        let get_header = |name: &str| {
             req.headers()
                 .get(name)
                 .and_then(|v| v.to_str().ok())
                 .map(|v| v.to_string())
-        });
+        };
+        let consumer_id = if let Some(ref cb) = self.client.identify_consumer() {
+            cb(&get_header)
+        } else {
+            default_identify_consumer(get_header)
+        };
 
         let client = Arc::clone(&self.client);
         let fut = self.service.call(req);

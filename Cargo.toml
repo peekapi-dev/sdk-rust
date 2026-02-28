@@ -1,10 +1,10 @@
 [package]
-name = "apidash"
+name = "peekapi"
 version = "0.1.0"
 edition = "2021"
 description = "API analytics SDK — buffers request events and flushes them to an ingestion endpoint"
 license = "MIT"
-repository = "https://github.com/api-usage-dashboard/sdk-rust"
+repository = "https://github.com/peekapi-dev/sdk-rust"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

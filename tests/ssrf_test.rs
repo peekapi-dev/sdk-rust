@@ -1,4 +1,4 @@
-use apidash::{is_private_ip, validate_endpoint};
+use peekapi::{is_private_ip, validate_endpoint};
 
 #[test]
 fn private_ipv4_10_range() {

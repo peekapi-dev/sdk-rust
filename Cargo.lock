@@ -222,25 +222,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
-name = "apidash"
-version = "0.1.0"
-dependencies = [
- "actix-service",
- "actix-web",
- "axum",
- "http 1.4.0",
- "pin-project-lite",
- "rocket",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tower",
- "tower-layer",
- "ureq",
-]
-
-[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1353,6 +1334,25 @@ dependencies = [
  "proc-macro2-diagnostics",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "peekapi"
+version = "0.1.0"
+dependencies = [
+ "actix-service",
+ "actix-web",
+ "axum",
+ "http 1.4.0",
+ "pin-project-lite",
+ "rocket",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tower",
+ "tower-layer",
+ "ureq",
 ]
 
 [[package]]

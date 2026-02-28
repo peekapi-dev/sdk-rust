@@ -10,7 +10,7 @@ pub mod middleware;
 mod ssrf;
 mod types;
 
-pub use client::ApiDashClient;
+pub use client::PeekApiClient;
 pub use consumer::{default_identify_consumer, hash_consumer_id};
 pub use ssrf::{is_private_ip, validate_endpoint};
-pub use types::{ErrorCallback, Options, RequestEvent};
+pub use types::{ErrorCallback, IdentifyConsumerFn, Options, RequestEvent};

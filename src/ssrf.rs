@@ -78,7 +78,7 @@ fn is_private_addr(addr: IpAddr) -> bool {
 ///   - Malformed URLs
 pub fn validate_endpoint(endpoint: &str) -> Result<String, String> {
     if endpoint.is_empty() {
-        return Err("[apidash] 'endpoint' is required".to_string());
+        return Err("[peekapi] 'endpoint' is required".to_string());
     }
 
     let url = url_parse(endpoint)?;
@@ -87,17 +87,17 @@ pub fn validate_endpoint(endpoint: &str) -> Result<String, String> {
 
     if url.scheme != "https" && !is_localhost {
         return Err(format!(
-            "[apidash] Endpoint must use HTTPS. Plain HTTP is only allowed for localhost: {endpoint}"
+            "[peekapi] Endpoint must use HTTPS. Plain HTTP is only allowed for localhost: {endpoint}"
         ));
     }
 
     if url.has_credentials {
-        return Err("[apidash] Endpoint URL must not contain credentials".to_string());
+        return Err("[peekapi] Endpoint URL must not contain credentials".to_string());
     }
 
     if !is_localhost && is_private_ip(&url.host) {
         return Err(format!(
-            "[apidash] Endpoint must not point to a private or internal IP address: {}",
+            "[peekapi] Endpoint must not point to a private or internal IP address: {}",
             url.host
         ));
     }
@@ -115,7 +115,7 @@ fn url_parse(endpoint: &str) -> Result<ParsedUrl, String> {
     // Minimal URL parsing — avoids pulling in the `url` crate
     let (scheme, rest) = endpoint
         .split_once("://")
-        .ok_or_else(|| format!("[apidash] Invalid endpoint URL: {endpoint}"))?;
+        .ok_or_else(|| format!("[peekapi] Invalid endpoint URL: {endpoint}"))?;
 
     let authority = rest.split('/').next().unwrap_or(rest);
     let has_credentials = authority.contains('@');
@@ -140,7 +140,7 @@ fn url_parse(endpoint: &str) -> Result<ParsedUrl, String> {
     };
 
     if host.is_empty() {
-        return Err(format!("[apidash] Invalid endpoint URL: {endpoint}"));
+        return Err(format!("[peekapi] Invalid endpoint URL: {endpoint}"));
     }
 
     Ok(ParsedUrl {

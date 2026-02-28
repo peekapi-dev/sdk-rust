@@ -1,5 +1,5 @@
 use crate::ssrf::validate_endpoint;
-use crate::types::{ErrorCallback, Options, RequestEvent};
+use crate::types::{ErrorCallback, IdentifyConsumerFn, Options, RequestEvent};
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -7,12 +7,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+const DEFAULT_ENDPOINT: &str = "https://ingest.peekapi.dev/v1/events";
 const MAX_PATH_LENGTH: usize = 2048;
 const MAX_METHOD_LENGTH: usize = 16;
 const MAX_CONSUMER_ID_LENGTH: usize = 256;
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const BASE_BACKOFF: Duration = Duration::from_secs(1);
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+const DISK_RECOVERY_INTERVAL: Duration = Duration::from_secs(60);
 
 struct Inner {
     buffer: Vec<RequestEvent>,
@@ -28,7 +30,7 @@ struct Inner {
 /// Events are accumulated in memory and flushed to the ingestion endpoint
 /// on a background thread. Undelivered events are persisted to disk (JSONL)
 /// and recovered on the next startup.
-pub struct ApiDashClient {
+pub struct PeekApiClient {
     inner: Mutex<Inner>,
     cond: Condvar,
     closed: AtomicBool,
@@ -37,7 +39,7 @@ pub struct ApiDashClient {
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
-/// Immutable configuration extracted from Options (no callbacks).
+/// Immutable configuration extracted from Options (includes callbacks).
 struct ClientOpts {
     api_key: String,
     endpoint: String,
@@ -46,33 +48,40 @@ struct ClientOpts {
     max_buffer_size: usize,
     max_storage_bytes: u64,
     max_event_bytes: usize,
+    collect_query_string: bool,
     debug: bool,
     storage_path: String,
     on_error: Option<ErrorCallback>,
+    identify_consumer: Option<IdentifyConsumerFn>,
 }
 
-impl ApiDashClient {
+impl PeekApiClient {
     /// Create a new client with the given options.
     ///
     /// Validates the configuration, loads any previously persisted events
     /// from disk, and starts a background thread for periodic flushing.
     pub fn new(opts: Options) -> Result<Arc<Self>, String> {
         if opts.api_key.is_empty() {
-            return Err("[apidash] 'api_key' is required".to_string());
+            return Err("[peekapi] 'api_key' is required".to_string());
         }
         if opts.api_key.contains('\0') || opts.api_key.contains('\r') || opts.api_key.contains('\n')
         {
-            return Err("[apidash] 'api_key' contains invalid characters".to_string());
+            return Err("[peekapi] 'api_key' contains invalid characters".to_string());
         }
 
-        let endpoint = validate_endpoint(&opts.endpoint)?;
+        let raw_endpoint = if opts.endpoint.is_empty() {
+            DEFAULT_ENDPOINT.to_string()
+        } else {
+            opts.endpoint.clone()
+        };
+        let endpoint = validate_endpoint(&raw_endpoint)?;
 
         let storage_path = opts.storage_path.unwrap_or_else(|| {
             use sha2::{Digest, Sha256};
             let hash = Sha256::digest(endpoint.as_bytes());
             let hex: String = hash[..4].iter().map(|b| format!("{b:02x}")).collect();
             let dir = std::env::temp_dir();
-            dir.join(format!("apidash-events-{hex}.jsonl"))
+            dir.join(format!("peekapi-events-{hex}.jsonl"))
                 .to_string_lossy()
                 .to_string()
         });
@@ -103,9 +112,11 @@ impl ApiDashClient {
             } else {
                 opts.max_event_bytes
             },
+            collect_query_string: opts.collect_query_string,
             debug: opts.debug,
             storage_path,
             on_error: opts.on_error,
+            identify_consumer: opts.identify_consumer,
         };
 
         let inner = Inner {
@@ -130,9 +141,9 @@ impl ApiDashClient {
         // Spawn background flush thread
         let c = Arc::clone(&client);
         let handle = std::thread::Builder::new()
-            .name("apidash-flush".to_string())
+            .name("peekapi-flush".to_string())
             .spawn(move || c.background_loop())
-            .map_err(|e| format!("[apidash] Failed to spawn flush thread: {e}"))?;
+            .map_err(|e| format!("[peekapi] Failed to spawn flush thread: {e}"))?;
 
         *client.thread.lock().unwrap() = Some(handle);
         Ok(client)
@@ -174,7 +185,7 @@ impl ApiDashClient {
                 if let Ok(raw2) = serde_json::to_vec(&event) {
                     if raw2.len() > self.opts.max_event_bytes {
                         if self.opts.debug {
-                            eprintln!("[apidash] Event too large, dropping ({} bytes)", raw2.len());
+                            eprintln!("[peekapi] Event too large, dropping ({} bytes)", raw2.len());
                         }
                         return;
                     }
@@ -222,6 +233,7 @@ impl ApiDashClient {
             std::mem::replace(&mut guard.buffer, spare)
         };
 
+        let event_count = events.len();
         let result = self.send(&events);
 
         let mut guard = self.inner.lock().unwrap();
@@ -231,21 +243,21 @@ impl ApiDashClient {
             Ok(()) => {
                 guard.consecutive_failures = 0;
                 guard.backoff_until = Instant::now();
+                if self.opts.debug {
+                    eprintln!("[peekapi] Flushed {event_count} events");
+                }
                 // Recycle the events vec as spare
                 let mut recycled = events;
                 recycled.clear();
                 if guard.spare.is_empty() {
                     guard.spare = recycled;
                 }
-                if self.opts.debug {
-                    eprintln!("[apidash] Flushed events successfully");
-                }
             }
             Err(ref e) if !is_retryable(e) => {
                 drop(guard);
                 self.persist_to_disk(&events);
                 if self.opts.debug {
-                    eprintln!("[apidash] Non-retryable error, persisted to disk: {e}");
+                    eprintln!("[peekapi] Non-retryable error, persisted to disk: {e}");
                 }
                 self.call_on_error(e);
             }
@@ -277,7 +289,7 @@ impl ApiDashClient {
                 }
 
                 if self.opts.debug {
-                    eprintln!("[apidash] Flush failed: {e}");
+                    eprintln!("[peekapi] Flush failed ({event_count} events): {e}");
                 }
                 self.call_on_error(e);
             }
@@ -321,9 +333,25 @@ impl ApiDashClient {
         }
     }
 
+    /// Returns whether query string collection is enabled.
+    pub fn collect_query_string(&self) -> bool {
+        self.opts.collect_query_string
+    }
+
+    /// Returns the custom consumer identification callback, if set.
+    pub fn identify_consumer(&self) -> &Option<IdentifyConsumerFn> {
+        &self.opts.identify_consumer
+    }
+
     /// Current number of events in the buffer (for testing).
     pub fn buffer_len(&self) -> usize {
         self.inner.lock().unwrap().buffer.len()
+    }
+
+    /// Recover persisted events from disk into the buffer.
+    /// Called automatically by the background thread every 60s.
+    pub fn recover_from_disk(&self) {
+        self.load_from_disk();
     }
 
     // ------------------------------------------------------------------
@@ -331,6 +359,8 @@ impl ApiDashClient {
     // ------------------------------------------------------------------
 
     fn background_loop(&self) {
+        let mut last_disk_recovery = Instant::now();
+
         loop {
             // Wait until woken or flush interval elapses
             let guard = self.inner.lock().unwrap();
@@ -346,6 +376,12 @@ impl ApiDashClient {
             }
 
             self.flush();
+
+            // Periodically recover persisted events from disk
+            if last_disk_recovery.elapsed() >= DISK_RECOVERY_INTERVAL {
+                last_disk_recovery = Instant::now();
+                self.load_from_disk();
+            }
         }
     }
 
@@ -362,7 +398,7 @@ impl ApiDashClient {
             .set("Content-Type", "application/json")
             .set("x-api-key", &self.opts.api_key)
             .set(
-                "x-apidash-sdk",
+                "x-peekapi-sdk",
                 &format!("rust/{}", env!("CARGO_PKG_VERSION")),
             )
             .send_bytes(&body);
@@ -408,7 +444,7 @@ impl ApiDashClient {
         if current_size >= self.opts.max_storage_bytes {
             if self.opts.debug {
                 eprintln!(
-                    "[apidash] Storage file full ({current_size} bytes), skipping disk persist of {} events",
+                    "[peekapi] Storage file full ({current_size} bytes), skipping disk persist of {} events",
                     events.len()
                 );
             }
@@ -419,7 +455,7 @@ impl ApiDashClient {
             Ok(d) => d,
             Err(e) => {
                 if self.opts.debug {
-                    eprintln!("[apidash] Failed to marshal events for disk: {e}");
+                    eprintln!("[peekapi] Failed to marshal events for disk: {e}");
                 }
                 return;
             }
@@ -434,11 +470,11 @@ impl ApiDashClient {
             Ok(mut f) => {
                 if let Err(e) = writeln!(f, "{data}") {
                     if self.opts.debug {
-                        eprintln!("[apidash] Failed to write events to disk: {e}");
+                        eprintln!("[peekapi] Failed to write events to disk: {e}");
                     }
                 } else if self.opts.debug {
                     eprintln!(
-                        "[apidash] Persisted {} events to {}",
+                        "[peekapi] Persisted {} events to {}",
                         events.len(),
                         self.opts.storage_path
                     );
@@ -446,7 +482,7 @@ impl ApiDashClient {
             }
             Err(e) => {
                 if self.opts.debug {
-                    eprintln!("[apidash] Failed to open storage file: {e}");
+                    eprintln!("[peekapi] Failed to open storage file: {e}");
                 }
             }
         }
@@ -495,7 +531,7 @@ impl ApiDashClient {
         let _ = fs::remove_file(&self.opts.storage_path);
 
         if self.opts.debug && loaded > 0 {
-            eprintln!("[apidash] Recovered {loaded} events from disk");
+            eprintln!("[peekapi] Recovered {loaded} events from disk");
         }
     }
 
@@ -510,7 +546,7 @@ impl ApiDashClient {
     }
 }
 
-impl Drop for ApiDashClient {
+impl Drop for PeekApiClient {
     fn drop(&mut self) {
         if !self.closed.load(Ordering::Relaxed) {
             self.shutdown();

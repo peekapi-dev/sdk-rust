@@ -1,4 +1,4 @@
-use apidash::{ApiDashClient, Options, RequestEvent};
+use peekapi::{PeekApiClient, Options, RequestEvent};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,11 +16,11 @@ fn test_event() -> RequestEvent {
     }
 }
 
-fn make_client(storage_path: &str) -> Arc<ApiDashClient> {
+fn make_client(storage_path: &str) -> Arc<PeekApiClient> {
     let mut opts = Options::new("ak_test_key", "http://localhost:9999/ingest");
     opts.storage_path = Some(storage_path.to_string());
     opts.flush_interval = Duration::from_secs(60); // long interval so we control flush
-    ApiDashClient::new(opts).unwrap()
+    PeekApiClient::new(opts).unwrap()
 }
 
 #[test]
@@ -134,25 +134,26 @@ fn shutdown_is_idempotent() {
 #[test]
 fn new_rejects_empty_api_key() {
     let opts = Options::new("", "http://localhost:9999/ingest");
-    assert!(ApiDashClient::new(opts).is_err());
+    assert!(PeekApiClient::new(opts).is_err());
 }
 
 #[test]
 fn new_rejects_api_key_with_control_chars() {
     let opts = Options::new("key\0value", "http://localhost:9999/ingest");
-    assert!(ApiDashClient::new(opts).is_err());
+    assert!(PeekApiClient::new(opts).is_err());
 }
 
 #[test]
-fn new_rejects_empty_endpoint() {
+fn empty_endpoint_uses_default() {
     let opts = Options::new("ak_test", "");
-    assert!(ApiDashClient::new(opts).is_err());
+    let client = PeekApiClient::new(opts).unwrap();
+    client.shutdown();
 }
 
 #[test]
 fn new_rejects_http_non_localhost() {
     let opts = Options::new("ak_test", "http://example.com/ingest");
-    assert!(ApiDashClient::new(opts).is_err());
+    assert!(PeekApiClient::new(opts).is_err());
 }
 
 #[test]
@@ -166,7 +167,7 @@ fn new_allows_http_localhost() {
         .to_string();
     let mut opts = Options::new("ak_test", "http://localhost:9999/ingest");
     opts.storage_path = Some(path);
-    let client = ApiDashClient::new(opts);
+    let client = PeekApiClient::new(opts);
     assert!(client.is_ok());
     client.unwrap().shutdown();
 }
@@ -182,7 +183,7 @@ fn new_allows_https() {
         .to_string();
     let mut opts = Options::new("ak_test", "https://api.example.com/ingest");
     opts.storage_path = Some(path);
-    let client = ApiDashClient::new(opts);
+    let client = PeekApiClient::new(opts);
     assert!(client.is_ok());
     client.unwrap().shutdown();
 }
@@ -226,6 +227,64 @@ fn disk_persistence_round_trip() {
 }
 
 #[test]
+fn runtime_disk_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("events.jsonl")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let client = make_client(&path);
+
+    // Simulate events persisted to disk mid-process
+    let events = vec![test_event()];
+    let data = serde_json::to_string(&events).unwrap();
+    std::fs::write(&path, format!("{}\n", data)).unwrap();
+
+    // Trigger runtime recovery on the same client
+    client.recover_from_disk();
+
+    assert_eq!(
+        client.buffer_len(),
+        1,
+        "Should have recovered 1 event from disk"
+    );
+    client.shutdown();
+}
+
+#[test]
+fn custom_identify_consumer_callback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("events.jsonl")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let mut opts = Options::new("ak_test", "http://localhost:9999/ingest");
+    opts.storage_path = Some(path);
+    opts.flush_interval = Duration::from_secs(60);
+    opts.identify_consumer = Some(Box::new(|get_header| get_header("x-tenant-id")));
+
+    let client = PeekApiClient::new(opts).unwrap();
+    let cb = client.identify_consumer();
+    assert!(cb.is_some());
+
+    // Simulate header lookup
+    let id = cb.as_ref().unwrap()(&|name| match name {
+        "x-tenant-id" => Some("tenant-42".to_string()),
+        "x-api-key" => Some("ignored".to_string()),
+        _ => None,
+    });
+    assert_eq!(id, Some("tenant-42".to_string()));
+
+    client.shutdown();
+}
+
+#[test]
 fn track_respects_max_buffer_size() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir
@@ -240,7 +299,7 @@ fn track_respects_max_buffer_size() {
     opts.flush_interval = Duration::from_secs(60);
     opts.max_buffer_size = 5;
     opts.batch_size = 1000; // don't trigger batch flush
-    let client = ApiDashClient::new(opts).unwrap();
+    let client = PeekApiClient::new(opts).unwrap();
 
     for _ in 0..10 {
         client.track(test_event());
@@ -248,5 +307,44 @@ fn track_respects_max_buffer_size() {
 
     // Buffer should not exceed max_buffer_size
     assert!(client.buffer_len() <= 5);
+    client.shutdown();
+}
+
+#[test]
+fn collect_query_string_defaults_to_false() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("events.jsonl")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let mut opts = Options::new("ak_test", "http://localhost:9999/ingest");
+    opts.storage_path = Some(path);
+    opts.flush_interval = Duration::from_secs(60);
+    let client = PeekApiClient::new(opts).unwrap();
+
+    assert!(!client.collect_query_string());
+    client.shutdown();
+}
+
+#[test]
+fn collect_query_string_getter() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("events.jsonl")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let mut opts = Options::new("ak_test", "http://localhost:9999/ingest");
+    opts.storage_path = Some(path);
+    opts.flush_interval = Duration::from_secs(60);
+    opts.collect_query_string = true;
+    let client = PeekApiClient::new(opts).unwrap();
+
+    assert!(client.collect_query_string());
     client.shutdown();
 }

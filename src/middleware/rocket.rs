@@ -3,15 +3,15 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use apidash::{ApiDashClient, Options};
-//! use apidash::middleware::rocket::ApiDashFairing;
+//! use peekapi::{PeekApiClient, Options};
+//! use peekapi::middleware::rocket::PeekApiFairing;
 //!
-//! let client = ApiDashClient::new(Options::new("key", "https://example.com/ingest")).unwrap();
-//! let rocket = rocket::build().attach(ApiDashFairing::new(client));
+//! let client = PeekApiClient::new(Options::new("key", "https://example.com/ingest")).unwrap();
+//! let rocket = rocket::build().attach(PeekApiFairing::new(client));
 //! ```
 
 use crate::consumer::default_identify_consumer;
-use crate::{ApiDashClient, RequestEvent};
+use crate::{PeekApiClient, RequestEvent};
 
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::{Data, Request, Response};
@@ -19,18 +19,18 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// Rocket fairing that captures request analytics.
-pub struct ApiDashFairing {
-    client: Arc<ApiDashClient>,
+pub struct PeekApiFairing {
+    client: Arc<PeekApiClient>,
 }
 
-impl ApiDashFairing {
-    pub fn new(client: Arc<ApiDashClient>) -> Self {
+impl PeekApiFairing {
+    pub fn new(client: Arc<PeekApiClient>) -> Self {
         Self { client }
     }
 }
 
 #[rocket::async_trait]
-impl Fairing for ApiDashFairing {
+impl Fairing for PeekApiFairing {
     fn info(&self) -> Info {
         Info {
             name: "API Dashboard Analytics",
@@ -48,7 +48,18 @@ impl Fairing for ApiDashFairing {
         let elapsed = start.elapsed();
 
         let method = req.method().as_str().to_string();
-        let path = req.uri().path().to_string();
+        let mut path = req.uri().path().to_string();
+        if self.client.collect_query_string() {
+            if let Some(qs) = req.uri().query() {
+                let qs_str = qs.as_str();
+                if !qs_str.is_empty() {
+                    let mut params: Vec<&str> = qs_str.split('&').collect();
+                    params.sort();
+                    path.push('?');
+                    path.push_str(&params.join("&"));
+                }
+            }
+        }
         let status = resp.status().code;
 
         let request_size = req
@@ -59,8 +70,12 @@ impl Fairing for ApiDashFairing {
 
         let response_size = resp.body().preset_size().unwrap_or(0);
 
-        let consumer_id =
-            default_identify_consumer(|name| req.headers().get_one(name).map(|v| v.to_string()));
+        let get_header = |name: &str| req.headers().get_one(name).map(|v| v.to_string());
+        let consumer_id = if let Some(ref cb) = self.client.identify_consumer() {
+            cb(&get_header)
+        } else {
+            default_identify_consumer(get_header)
+        };
 
         self.client.track(RequestEvent {
             method,
