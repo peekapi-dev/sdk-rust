@@ -1,4 +1,4 @@
-use peekapi::{PeekApiClient, Options, RequestEvent};
+use peekapi::{Options, PeekApiClient, RequestEvent};
 use std::sync::Arc;
 use std::time::Duration;
 

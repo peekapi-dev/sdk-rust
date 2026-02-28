@@ -2,6 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/peekapi)](https://crates.io/crates/peekapi)
 [![license](https://img.shields.io/crates/l/peekapi)](./LICENSE)
+[![CI](https://github.com/peekapi-dev/sdk-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/peekapi-dev/sdk-rust/actions/workflows/ci.yml)
 
 Rust SDK for [PeekAPI](https://peekapi.dev). Thread-based buffered client with feature-gated middleware for Actix Web, Axum, and Rocket.
 
@@ -171,6 +172,14 @@ The callback receives a header-getter closure (`&dyn Fn(&str) -> Option<String>`
 ## Requirements
 
 - Rust 2021 edition
+
+## Contributing
+
+1. Fork & clone the repo
+2. Run tests — `cargo test`
+3. Lint — `cargo clippy --all-features`
+4. Format — `cargo fmt`
+5. Submit a PR
 
 ## License
 
