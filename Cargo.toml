@@ -5,6 +5,7 @@ edition = "2021"
 description = "API analytics SDK — buffers request events and flushes them to an ingestion endpoint"
 license = "MIT"
 repository = "https://github.com/peekapi-dev/sdk-rust"
+homepage = "https://peekapi.dev"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
